@@ -1,128 +1,96 @@
-import pdfplumber
-import pandas as pd
-import kaggle
+import streamlit as st
+from recipe_scrapers import scrape_me
+import requests
 from bs4 import BeautifulSoup
-import os
-import time
-import seaborn as sns
-import matplotlib.pyplot as plt
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+import re
+import base64
+import openai
+import textwrap
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel, Part
 
-dataset_name = 'yasserh/instacart-online-grocery-basket-analysis-dataset'
-destination_folder = '../ashita2789754543/data/kaggledata'
+openai.api_key = "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"
 
-kaggle.api.dataset_download_files(dataset_name, path=destination_folder, unzip=True)
-time.sleep(5)
-os.makedirs(destination_folder, exist_ok=True)
-dataset_filenames = ['aisles.csv', 'departments.csv', 'order_products__prior.csv', 'order_products__train.csv', 'orders.csv', 'products.csv']
-ascii_text_file = '../LAB_2/Instacart_Marketplace.html'
-pdf_or_word_document = '../LAB_2/InstacartFAQs.pdf'
-def explore_csv_excel(dataset_filenames):
-    try:
-        for filename in dataset_filenames:
-            file_path = os.path.join(destination_folder, filename)
-            df = pd.read_csv(file_path)
-            if filename =='products.csv':
-                df1=pd.read_csv(file_path)
-            if filename =='aisles.csv':
-                df2=pd.read_csv(file_path)
-            if filename =='departments.csv':
-                df3=pd.read_csv(file_path)
-            if filename =='order_products__train.csv':
-                df4=pd.read_csv(file_path)
-            if filename =='orders.csv':
-                df5=pd.read_csv(file_path)
-            print(f"Dataset: {filename}")
-            print(df.head())
-            print(f"Number of rows: {len(df)}")
-            print(f"Number of columns: {len(df.columns)}")
-            missing_data = df.isnull().sum()
-            print("Missing data:")
-            print(missing_data)
-            if filename =='aisles.csv':
-                sns.countplot(df.aisle, order=df.aisle.value_counts().index[:20])
-                plt.title('Online Shopping Aisle-Frequency')
-                plt.xticks(rotation=90)
-                plt.show()
-                time.sleep(5)    
-            if filename=='orders.csv':
-                sns.countplot(df.order_hour_of_day)
-                plt.title('Online Shopping Horly-Frequency')
-                plt.xticks(rotation=90)
-                plt.show()
-                time.sleep(5)    
-        df12 = pd.merge(df2, df1, how='inner', on='aisle_id')
-        df123 = pd.merge(df12, df3, how='inner', on='department_id')
-        df1234 = pd.merge(df4, df123, how='inner', on='product_id')
-        df12345 = pd.merge(df5, df1234, how='inner', on='order_id')
+def search_allrecipes(recipe_name):
+    base_url = "https://www.allrecipes.com/search"
+    params = {"q": recipe_name}
+    
+    response = requests.get(base_url, params=params).text
+    soup = BeautifulSoup(response, 'html.parser')
+    results = soup.find_all("a", {"id": re.compile(r'mntl-card-list-items_\d+-\d+')})
+    
+    return results
 
-        df6 = df12345.drop(['aisle_id','department_id','eval_set','order_number'],axis=1)
-        print("Dataset:")
-        print(df6.head())
-        print(f"Number of rows: {len(df6)}")
-        print(f"Number of columns: {len(df6.columns)}")
-        missing_data = df6.isnull().sum()
-        print("Missing data:")
-        print(missing_data)
-    except FileNotFoundError:
-        print(f"File not found: {filename}")
-    except Exception as e:
-        print(f"An error occurred while exploring {filename}: {str(e)}")
+def scrape_recipe(recipe_url):
+    scraper = scrape_me(recipe_url)
+    return scraper
 
-def explore_ascii_html(file_path):
-    if file_path.endswith(('.txt', '.html')):
-        try:
-            driver=webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-            url="https://instacartcommunityaffairs.com/"
-            wait = WebDriverWait(driver, 5)
+def extract_ingredient_names(ingredients):
+    measurement_words = ['cup', 'cups', 'tablespoons', 'tablespoon', 'teaspoons', 'teaspoon', 'medium', 'sliced', 'chopped', 'dried', 'freshly', 'to', 'taste', 'grated','cover','or','more', 'broken','pinch','thinly','into','inch','package','ounce']
+    exclusion_words = ['water']
+    ingredient_names = []
+    for ingredient in ingredients:
+        ingredient_without_numbers = re.sub(r'\d+(?:\.\d+)?', '', ingredient).strip()
+        words = ingredient_without_numbers.split()
+        cleaned_words = [word for word in words if word.lower() not in measurement_words and word.lower() not in exclusion_words and not word.isdigit()]
+        cleaned_words = [word.title() for word in cleaned_words]
+        cleaned_ingredient = ' '.join(cleaned_words).rstrip(',')
+        if cleaned_ingredient: 
+            ingredient_names.append(cleaned_ingredient)
+    return ingredient_names
 
-            driver.get(url)
+def main():
+    st.title("GroceRevo")
+    dynamic_content = st.empty()
+    recipe_name = st.text_input("Enter Recipe Name:")
+    recipe_book_file = st.file_uploader("Upload PDF Recipe Book", type=["pdf"])
+    pantry_images = st.file_uploader("Upload Pantry Images", type=["jpg", "jpeg", "png"])
+    
+    if st.button("Search"):
+        if recipe_name:
+            results = search_allrecipes(recipe_name)
+            
+            if results:
+                st.subheader("Select a Recipe:")
+                recipe_names = [result.text for result in results]
+                selected_recipe = dynamic_content.selectbox("Choose a recipe:", recipe_names)
 
-            get_url = driver.current_url
-            wait.until(EC.url_to_be(url))
+                selected_result = results[recipe_names.index(selected_recipe)]
+                href_value = selected_result.get('href')
 
-            response = driver.page_source
+                scraper = scrape_recipe(href_value)
+                ingredients = scraper.ingredients()
+                ingredient_names = extract_ingredient_names(ingredients)
 
-            data_folder="../ashita2789754543/data"
-            raw_data_folder=os.path.join(data_folder,"html_data")
-            os.makedirs(raw_data_folder,exist_ok=True)
+                st.subheader("Ingredients:")
+                for ingredient in ingredient_names:
+                    st.write(ingredient)
+                    search_url = f"https://www.ralphs.com/search?query={ingredient.replace(' ', '+')}&savings=On%20Sale&fulfillment=all"
+                    st.write(search_url)
 
-            soup=BeautifulSoup(response,"html.parser")
-            web_data_path=os.path.join(raw_data_folder,"web_data.html")
-            with open(web_data_path,"wb") as file:
-                file.write(soup.prettify().encode("utf-8"))
-                print("Data Collected and saved.")
+                st.subheader("Recipe Details:")
+                st.write(f"Link: {href_value}")
+                st.write(f"Rating: {scraper.ratings()}")
+                st.write(f"Description: {scraper.description()}")
+                st.write(f"Directions: {scraper.instructions()}")
+                st.subheader(f"Here is the nutritional information for {recipe_name}")
+                st.markdown(f"Nutrition Facts (per serving): {scraper.nutrients()}")
+                recipe_image = scraper.image()
+                if recipe_image:
+                    st.subheader("Recipe Image:")
+                    st.image(recipe_image, caption="Recipe Image", use_column_width=True)
 
-            with open(web_data_path,"r",encoding="utf-8") as file:
-                first_ten="\n".join([next(file) for _ in range(10)])
-                print(first_ten)
-        except Exception as e:
-            print("Error loading ASCII Text/HTML data:", str(e))
+                # Use vertexai for multiturn_generate_content
+                config = {
+                    "max_output_tokens": 2048,
+                    "temperature": 0.9,
+                    "top_p": 1
+                }
+                model = GenerativeModel("gemini-pro")
+                chat = model.start_chat()
+                st.subheader("Multiturn Generate Content:")
+                st.write(chat.send_message(f"recipe for {recipe_name}", generation_config=config))
+                st.write(chat.send_message("can you give me the links of ingredients required", generation_config=config))
 
-def explore_pdf_word(file_path):
-    if file_path.endswith(('.pdf', '.doc', '.docx')):
-        try:
-            if file_path.endswith(('.doc', '.docx')):
-                pdf_file_path = 'temp_pdf.pdf'
-                os.system(f'libreoffice --headless --convert-to pdf --outdir ./ {file_path}')
-                file_path = pdf_file_path
-            with pdfplumber.open(file_path) as pdf:
-                full_text = ""
-                word_count = 0
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    full_text += page_text + '\n'
-                    page_word_count = len(page_text.split())
-                    word_count += page_word_count
-                print("PDF/Word Data Sample:")
-                print(full_text[:500])
-                print("Total Word Count:", word_count)
-        except Exception as e:
-            print("Error loading PDF/Word data:", str(e))
-explore_csv_excel(dataset_filenames)
-explore_ascii_html(ascii_text_file)
-explore_pdf_word(pdf_or_word_document)
+if __name__ == "__main__":
+    main()
